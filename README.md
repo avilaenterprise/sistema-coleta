@@ -1,210 +1,144 @@
-# 📋 Sistema de Catalogação de Comprovantes de Entrega
+# Avila Transportes - Sistema de Cotação e Ordem de Coleta
 
-Sistema completo para catalogar, analisar e organizar comprovantes de entrega em formato JPG.
+🚚 Sistema completo para gestão de cotações e ordens de coleta desenvolvido para a Avila Transportes.
 
-## 🎯 Características
+## 🌟 Funcionalidades
 
-- **Catalogação Completa**: Analisa 3.676 comprovantes de entrega
-- **Detecção de Duplicatas**: Identifica e quantifica arquivos duplicados
-- **Análise de Metadados**: Extrai informações EXIF das imagens
-- **Relatórios Múltiplos**: Excel, CSV, JSON e TXT
-- **Limpeza Inteligente**: Remove duplicatas com backup automático
-- **Análise Temporal**: Padrões de uso por data e horário
-- **Compatível com Docker**: Execução portável e isolada
+### 🏢 Gestão de Clientes
+- Cadastro completo de clientes
+- Busca e consulta de informações
+- Histórico de cotações por cliente
 
-## 📊 Resultados da Análise
+### 🏙️ Gestão de Cidades (Integração IBGE)
+- Sincronização automática com API do IBGE
+- Todas as 5.570 cidades do Brasil
+- Busca inteligente por estado
+- Filtros em tempo real
 
-### Resumo Geral
-- ✅ **3.676 arquivos** processados
-- 💾 **4.724 MB** de espaço total ocupado
-- 🔄 **450 duplicatas** encontradas (296 MB desperdiçados)
-- 📱 **87.6%** são fotos mobile iOS
-- ⏰ **Horário de pico**: 4h da manhã (1.877 comprovantes)
+### 📋 Sistema de Cotações
+- Cálculo automático de cubagem
+- Sugestão de tipo de frete
+- Aprovação de cotações
+- Histórico completo
 
-### Distribuição por Tipo
-| Tipo | Quantidade | Percentual | Tamanho Médio |
-|------|------------|------------|---------------|
-| Foto Mobile iOS | 3.220 | 87.6% | 1.30 MB |
-| Sequencial Numerado | 381 | 10.4% | 1.13 MB |
-| Comprovante Padrão | 67 | 1.8% | 1.24 MB |
-| Comprovante Empresarial | 6 | 0.2% | 1.23 MB |
-| Documento Digital | 2 | 0.1% | 0.18 MB |
+### 📦 Ordens de Coleta
+- Geração automática de PDFs
+- Sistema de rastreamento
+- Notificações via WhatsApp
+- Status de coleta em tempo real
 
-### Oportunidades de Otimização
-- 🔄 **296 MB** podem ser liberados removendo duplicatas
-- 📏 **30 arquivos** > 3MB podem ser comprimidos
-- 🔤 **75 arquivos** precisam de nomenclatura padronizada
+## 🚀 Tecnologias
 
-## 🚀 Como Usar
+- **Frontend**: Streamlit
+- **Backend**: Python 3.11
+- **Banco de Dados**: SQLite
+- **PDF**: FPDF2
+- **API Externa**: IBGE (cidades)
+- **Deploy**: GitHub Pages + Heroku
 
-### Opção 1: Execução Direta (Python)
+## 📱 Acesso Online
 
-```bash
-# 1. Instalar dependências
-pip install pandas pillow openpyxl matplotlib seaborn numpy
+- **Produção**: [avilatransportes.com.br](https://avilatransportes.com.br)
+- **GitHub Pages**: [avilatransportes.github.io](https://avilatransportes.github.io)
 
-# 2. Executar catalogação
-python catalogador_comprovantes.py
-
-# 3. Análise avançada
-python analisador_avancado.py
-
-# 4. Limpeza (modo simulação)
-python limpador_comprovantes.py
-```
-
-### Opção 2: Execução via Docker
+## 🛠️ Instalação Local
 
 ```bash
-# Windows PowerShell
-.\executar_docker.ps1
+# Clone o repositório
+git clone https://github.com/avilatransportes/sistema-coleta.git
+cd sistema-coleta
 
-# Linux/Mac
-./executar_docker.sh
+# Instale as dependências
+pip install -r requirements.txt
+
+# Execute o sistema
+streamlit run main.py
 ```
 
-## 📁 Estrutura de Arquivos
+## 📊 Estrutura do Projeto
 
 ```
-C:\Users\NicolasAvila\
-├── catalogador_comprovantes.py    # Script principal de catalogação
-├── analisador_avancado.py         # Análise detalhada
-├── limpador_comprovantes.py       # Ferramenta de limpeza
-├── Dockerfile                     # Para execução em container
-├── requirements.txt               # Dependências Python
-├── executar_docker.ps1           # Script PowerShell para Docker
-└── Relatorios_Comprovantes/       # Pasta com todos os relatórios
-    ├── catalogo_completo_*.xlsx   # Relatório Excel completo
-    ├── catalogo_comprovantes_*.csv # Dados em CSV
-    ├── catalogo_comprovantes_*.json # Dados em JSON
-    ├── duplicatas_encontradas_*.txt # Lista de duplicatas
-    └── relatorio_executivo_*.txt   # Resumo executivo
+sistema-coleta/
+├── main.py                 # Aplicação principal
+├── requirements.txt        # Dependências Python
+├── Procfile               # Configuração Heroku
+├── runtime.txt            # Versão Python
+├── .streamlit/
+│   └── config.toml        # Configurações Streamlit
+├── coletas.db             # Banco de dados SQLite
+└── README.md              # Documentação
 ```
 
-## 📊 Relatórios Gerados
+## 🔧 Configurações
 
-### 1. **Catálogo Completo (Excel)**
-- 📈 Planilha principal com todos os dados
-- 📋 Aba separada para duplicatas
-- 📊 Aba com estatísticas resumidas
+### Parâmetros de Frete
+- Fiorino Fracionado: até 1.0 m³
+- Fiorino Dedicado: 1.0 - 3.0 m³
+- Van/VUC Fracionado: 1.0 - 7.0 m³
+- Van/VUC Dedicado: 7.0 - 15.0 m³
 
-### 2. **Arquivo CSV**
-- 📝 Dados estruturados para análise externa
-- 🔧 Compatível com Excel, Power BI, etc.
+### Valores por KM
+- Fiorino: R$ 1,80/km
+- Van/VUC: R$ 3,00/km
 
-### 3. **Arquivo JSON**
-- 🔧 Dados estruturados para APIs e sistemas
-- 📱 Ideal para integração com aplicações
+## 📞 Funcionalidades de Comunicação
 
-### 4. **Relatório de Duplicatas (TXT)**
-- 🔄 Lista detalhada de arquivos duplicados
-- 📋 Agrupados por hash MD5 idêntico
+### WhatsApp Automático
+- Notificação automática para destinatários
+- Link direto para WhatsApp
+- Mensagem personalizada com número da ordem
 
-### 5. **Relatório Executivo (TXT)**
-- 📊 Resumo executivo para gestão
-- 💡 Recomendações de otimização
+### Geração de PDF
+- Layout profissional
+- Logo personalizado
+- Dados completos da coleta
+- Assinatura digital
 
-## 🛠️ Funcionalidades Avançadas
+## 🔒 Segurança
 
-### Detecção de Duplicatas
-- ✅ Usa hash MD5 para identificação precisa
-- 📅 Mantém arquivo mais antigo de cada grupo
-- 💾 Calcula espaço desperdiçado exato
+- Queries SQL parametrizadas
+- Validação de entrada de dados
+- Tratamento de erros robusto
+- Timeouts para APIs externas
 
-### Análise de Metadados
-- 📷 Extrai informações EXIF das fotos
-- 📱 Identifica modelo de câmera/dispositivo
-- 📅 Data real da foto vs. data do arquivo
+## 📈 Performance
 
-### Classificação Inteligente
-- 📱 Fotos Mobile iOS (padrão data/hora)
-- 🔢 Numeração Sequencial
-- 🏢 Comprovantes Empresariais
-- 📄 Documentos Digitais
-- 📋 Comprovantes Padrão
+- Cache local de cidades IBGE
+- Busca otimizada (máximo 50 resultados)
+- Filtros em tempo real
+- Interface responsiva
 
-### Análise Temporal
-- 📊 Distribuição por hora do dia
-- 📅 Padrões por data
-- ⏰ Identificação de horários de pico
+## 🌐 Deploy
 
-## 🧹 Ferramenta de Limpeza
+### GitHub Pages
+1. Push para repositório GitHub
+2. Ative GitHub Pages nas configurações
+3. Escolha branch main como source
 
-### Modo Simulação (Padrão)
-- 📋 Mostra o que seria feito sem executar
-- ✅ Seguro para análise prévia
-- 📊 Relatório detalhado de ações
+### Domínio Personalizado
+1. Configure DNS do domínio para apontar para GitHub Pages
+2. Adicione arquivo CNAME com o domínio
+3. Ative HTTPS nas configurações
 
-### Modo Execução Real
-- 🚨 **ATENÇÃO**: Modifica arquivos reais!
-- 💾 Cria backup automático antes de qualquer alteração
-- 🔄 Remove duplicatas preservando originais
-- 📁 Organiza arquivos por tipo em subpastas
+## 📝 Changelog
 
-## 🐳 Execução com Docker
+### v2.0 - Integração IBGE
+- ✅ API do IBGE para cidades
+- ✅ Busca inteligente
+- ✅ Performance otimizada
 
-### Vantagens
-- 🔒 Isolamento completo do ambiente
-- 📦 Dependências já incluídas
-- 🔄 Reprodutível em qualquer sistema
-- 🛡️ Maior segurança
+### v1.0 - Sistema Base
+- ✅ Gestão de clientes
+- ✅ Sistema de cotações
+- ✅ Ordens de coleta
+- ✅ Geração de PDF
 
-### Volumes Mapeados
-- `D:\Jpg` → `/app/dados` (pasta de origem)
-- `C:\Users\NicolasAvila\Relatorios_Comprovantes` → `/app/relatorios` (saída)
+## 👨‍💻 Desenvolvido por
 
-## 💡 Recomendações de Uso
-
-### 1. **Primeira Execução**
-```bash
-# Executar catalogação inicial
-python catalogador_comprovantes.py
-
-# Analisar resultados
-python analisador_avancado.py
-```
-
-### 2. **Limpeza Segura**
-```bash
-# Testar em modo simulação primeiro
-python limpador_comprovantes.py
-# (escolher 's' para simulação)
-
-# Executar limpeza real após confirmar
-python limpador_comprovantes.py
-# (escolher 'n' para execução real)
-```
-
-### 3. **Monitoramento Contínuo**
-- ⏰ Executar catalogação semanalmente
-- 📊 Acompanhar crescimento do acervo
-- 🔄 Limpar duplicatas regularmente
-
-## 🔒 Segurança e Backup
-
-- ✅ Modo simulação padrão (sem riscos)
-- 💾 Backup automático antes de qualquer alteração
-- 📂 Arquivos originais preservados
-- 🔄 Operações reversíveis
-
-## 📈 Métricas de Performance
-
-- ⚡ **Velocidade**: ~3.676 arquivos em ~2 minutos
-- 💾 **Eficiência**: Identifica 296 MB de duplicatas
-- 📊 **Precisão**: 100% na detecção por hash MD5
-- 🔧 **Automação**: Zero intervenção manual necessária
-
-## 🎯 Próximos Passos Sugeridos
-
-1. **Executar limpeza** das 450 duplicatas (296 MB)
-2. **Implementar nomenclatura** padronizada
-3. **Configurar execução** automática semanal
-4. **Criar processo** de backup regular
-5. **Integrar com sistema** de gestão documental
+**Nícolas Rosa Ávila Barros**  
+Avila Transportes  
+📧 contato@avilatransportes.com.br
 
 ---
 
-**📞 Suporte**: Sistema desenvolvido para catalogação eficiente de comprovantes de entrega.
-**🔧 Tecnologias**: Python 3.11+, Pandas, PIL, Docker
-**📅 Versão**: 1.0 - Julho 2025
-"# sistema-coleta" 
+© 2025 Avila Transportes. Todos os direitos reservados.

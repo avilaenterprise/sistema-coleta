@@ -1,0 +1,1202 @@
+import streamlit as st
+import pandas as pd
+from fpdf import FPDF
+import sqlite3
+import datetime
+import io
+import os
+import urllib.parse
+import requests
+
+# ========= BANCO DE DADOS E CONFIG ==========
+
+def init_db():
+    conn = sqlite3.connect("coletas.db", check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS cidades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT UNIQUE NOT NULL
+        );
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS clientes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT,
+            cnpj TEXT,
+            inscricao_estadual TEXT,
+            endereco TEXT,
+            bairro TEXT, 
+            cidade TEXT,
+            uf TEXT,
+            email TEXT,
+            telefone TEXT,
+            cep TEXT,
+            complemento TEXT
+        );
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS cotacoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            numero_cotacao TEXT,
+            cliente_nome TEXT,
+            cnpj TEXT,
+            origem TEXT,
+            destino TEXT,
+            data_solicitacao TEXT,
+            mercadoria TEXT,
+            peso TEXT,
+            volume TEXT,
+            valor_cotado TEXT,
+            validade TEXT,
+            observacoes TEXT,
+            responsavel TEXT,
+            status TEXT DEFAULT 'PENDENTE'
+        );
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS coletas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            numero_coleta TEXT,
+            numero_cotacao TEXT,
+            emitente_nome TEXT, emitente_cnpj TEXT, emitente_endereco TEXT, emitente_telefone TEXT,
+            emitente_cidade TEXT, emitente_uf TEXT, emitente_cep TEXT, emitente_bairro TEXT, emitente_complemento TEXT, emitente_email TEXT,
+            destinatario_nome TEXT, destinatario_cnpj TEXT, destinatario_endereco TEXT, destinatario_telefone TEXT,
+            destinatario_cidade TEXT, destinatario_uf TEXT, destinatario_cep TEXT, destinatario_bairro TEXT, destinatario_complemento TEXT, destinatario_email TEXT,
+            data_solicitacao TEXT, data_coleta TEXT, horario TEXT,
+            tipo_mercadoria TEXT, peso TEXT, volume TEXT, observacoes TEXT, responsavel TEXT, logo BLOB,
+            status_coleta TEXT DEFAULT 'AGUARDANDO',
+            custo_coleta TEXT,
+            localizacao_mercadoria TEXT
+        );
+    """)
+    conn.commit()
+    return conn
+
+def importar_cidades_excel(conn, file_path):
+    if not os.path.isfile(file_path):
+        return
+    try:
+        df = pd.read_excel(file_path)
+        cursor = conn.cursor()
+        for nome in df['nome'].dropna().unique():
+            cursor.execute("INSERT OR IGNORE INTO cidades (nome) VALUES (?)", (nome.strip(),))
+        conn.commit()
+    except Exception as e:
+        st.warning(f"Erro ao importar cidades: {e}")
+
+def get_default_config():
+    return {
+        "fiorino_fracionado_max": 1.0,
+        "fiorino_dedicado_min": 1.0,
+        "fiorino_dedicado_max": 3.0,
+        "vanvuc_fracionado_min": 1.0,
+        "vanvuc_fracionado_max": 7.0,
+        "vanvuc_dedicado_min": 7.0,
+        "vanvuc_dedicado_max": 15.0,
+        "valor_km_fiorino": 1.80,
+        "valor_km_vanvuc": 3.00
+    }
+
+# ========= FUNÇÕES UTILITÁRIAS DE BANCO ==========
+
+def buscar_cidades_ibge():
+    """Busca todas as cidades do Brasil através da API do IBGE"""
+    try:
+        url = "https://servicodados.ibge.gov.br/api/v1/localidades/municipios"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            municipios = response.json()
+            cidades = []
+            for municipio in municipios:
+                cidade = {
+                    'id': municipio['id'],
+                    'nome': municipio['nome'],
+                    'uf': municipio['microrregiao']['mesorregiao']['UF']['sigla'],
+                    'nome_completo': f"{municipio['nome']} - {municipio['microrregiao']['mesorregiao']['UF']['sigla']}"
+                }
+                cidades.append(cidade)
+            return pd.DataFrame(cidades)
+        else:
+            st.error(f"Erro ao buscar cidades do IBGE: {response.status_code}")
+            return pd.DataFrame()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Erro de conexão com IBGE: {e}")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Erro inesperado ao buscar cidades: {e}")
+        return pd.DataFrame()
+
+def buscar_cidades_por_uf_ibge(uf):
+    """Busca cidades de um estado específico através da API do IBGE"""
+    try:
+        url = f"https://servicodados.ibge.gov.br/api/v1/localidades/estados/{uf}/municipios"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            municipios = response.json()
+            cidades = []
+            for municipio in municipios:
+                cidade = {
+                    'id': municipio['id'],
+                    'nome': municipio['nome'],
+                    'uf': uf.upper(),
+                    'nome_completo': f"{municipio['nome']} - {uf.upper()}"
+                }
+                cidades.append(cidade)
+            return pd.DataFrame(cidades)
+        else:
+            st.error(f"Erro ao buscar cidades do estado {uf}: {response.status_code}")
+            return pd.DataFrame()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Erro de conexão com IBGE: {e}")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Erro inesperado ao buscar cidades: {e}")
+        return pd.DataFrame()
+
+def sincronizar_cidades_ibge(conn):
+    """Sincroniza as cidades locais com as do IBGE - USO RESTRITO"""
+    
+    # Verificar se já foi sincronizado recentemente
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM cidades")
+    total_cidades = cursor.fetchone()[0]
+    
+    if total_cidades > 1000:  # Se já tem muitas cidades, avisar
+        st.warning("⚠️ Você já possui muitas cidades cadastradas. Tem certeza que quer fazer sincronização completa?")
+        if not st.checkbox("Sim, quero sincronizar novamente"):
+            return False
+    
+    st.warning("🚨 **ATENÇÃO:** Esta operação faz mais de 5.000 requisições à API do IBGE!")
+    st.info("💡 **Recomendação:** Use apenas na primeira configuração do sistema.")
+    
+    if not st.button("Confirmar Sincronização Completa", type="primary"):
+        return False
+    
+    st.info("Iniciando sincronização com IBGE...")
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    try:
+        # Buscar cidades do IBGE em lotes menores por estado
+        status_text.text("Buscando lista de estados...")
+        progress_bar.progress(10)
+        
+        estados = [
+            "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", 
+            "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", 
+            "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"
+        ]
+        
+        all_cidades = []
+        total_estados = len(estados)
+        
+        for i, uf in enumerate(estados):
+            status_text.text(f"Buscando cidades de {uf}...")
+            progress_bar.progress(10 + (i * 80 // total_estados))
+            
+            try:
+                df_uf = buscar_cidades_por_uf_ibge(uf)
+                if not df_uf.empty:
+                    all_cidades.extend(df_uf['nome_completo'].tolist())
+                    # Pausa para não sobrecarregar a API
+                    import time
+                    time.sleep(0.1)  # 100ms entre requisições
+                else:
+                    st.warning(f"Erro ao buscar cidades de {uf}")
+            except Exception as e:
+                st.error(f"Erro em {uf}: {str(e)}")
+                continue
+        
+        if not all_cidades:
+            st.error("Não foi possível sincronizar com o IBGE")
+            return False
+        
+        progress_bar.progress(90)
+        status_text.text("Salvando no banco de dados...")
+        
+        # Limpar e inserir cidades
+        cursor.execute("DELETE FROM cidades")
+        
+        for cidade in all_cidades:
+            cursor.execute(
+                "INSERT OR IGNORE INTO cidades (nome) VALUES (?)", 
+                (cidade,)
+            )
+        
+        conn.commit()
+        progress_bar.progress(100)
+        
+        st.success(f"✅ Sincronização concluída! {len(all_cidades)} cidades importadas do IBGE")
+        st.info("💡 Agora você pode usar o sistema normalmente sem precisar sincronizar novamente.")
+        return True
+        
+    except Exception as e:
+        st.error(f"Erro durante sincronização: {str(e)}")
+        return False
+
+def buscar_cidades(conn):
+    return pd.read_sql_query("SELECT * FROM cidades ORDER BY nome ASC", conn)
+
+def selectbox_cidade_com_busca(label, df_cidades, key=None):
+    """Cria um selectbox de cidades com funcionalidade de busca"""
+    cidades_list = df_cidades["nome"].tolist()
+    
+    # Campo de busca
+    busca = st.text_input(f"🔍 Buscar {label.lower()}", key=f"busca_{key}", placeholder="Digite para filtrar...")
+    
+    # Filtrar cidades baseado na busca
+    if busca:
+        cidades_filtradas = [cidade for cidade in cidades_list if busca.lower() in cidade.lower()]
+        if not cidades_filtradas:
+            st.warning(f"Nenhuma cidade encontrada com '{busca}'")
+            cidades_filtradas = cidades_list[:10]  # Mostra as 10 primeiras se não encontrar
+    else:
+        cidades_filtradas = cidades_list[:50]  # Mostra apenas as 50 primeiras para performance
+    
+    # Selectbox com cidades filtradas
+    if cidades_filtradas:
+        cidade_selecionada = st.selectbox(
+            label, 
+            options=cidades_filtradas,
+            key=key,
+            help=f"Digite acima para buscar uma cidade específica. Mostrando {len(cidades_filtradas)} cidades."
+        )
+        return cidade_selecionada
+    else:
+        st.error("Nenhuma cidade disponível. Vá para 'Cidades' e sincronize com o IBGE.")
+        return None
+
+def cadastrar_cidade(conn, nome):
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO cidades (nome) VALUES (?)", (nome.strip(),))
+    conn.commit()
+
+def buscar_clientes(conn):
+    return pd.read_sql_query("SELECT * FROM clientes", conn)
+
+def cadastrar_cliente(conn, nome, cnpj, inscricao_estadual, endereco, bairro, cidade, uf, email, telefone, cep, complemento):
+    cursor = conn.cursor()
+    cursor.execute("""INSERT INTO clientes 
+                   (nome, cnpj, inscricao_estadual, endereco, bairro, cidade, uf, email, telefone, cep, complemento) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (nome, cnpj, inscricao_estadual, endereco, bairro, cidade, uf, email, telefone, cep, complemento))
+    conn.commit()
+
+def buscar_cotacoes(conn):
+    return pd.read_sql_query("SELECT * FROM cotacoes ORDER BY id DESC", conn)
+
+def cadastrar_cotacao(conn, cotacao):
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO cotacoes (
+            numero_cotacao, cliente_nome, cnpj, origem, destino, data_solicitacao, mercadoria, peso, volume,
+            valor_cotado, validade, observacoes, responsavel, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        cotacao['numero_cotacao'], cotacao['cliente_nome'], cotacao['cnpj'], cotacao['origem'], cotacao['destino'],
+        cotacao['data_solicitacao'], cotacao['mercadoria'], cotacao['peso'], cotacao['volume'],
+        cotacao['valor_cotado'], cotacao['validade'], cotacao['observacoes'], cotacao['responsavel'], cotacao['status']
+    ))
+    conn.commit()
+
+def atualizar_status_cotacao(conn, cotacao_id, novo_status):
+    cursor = conn.cursor()
+    cursor.execute("UPDATE cotacoes SET status=? WHERE id=?", (novo_status, cotacao_id))
+    conn.commit()
+
+def buscar_coletas(conn):
+    return pd.read_sql_query("SELECT * FROM coletas ORDER BY id DESC", conn)
+
+def cadastrar_coleta(conn, coleta, emitente, destinatario):
+    """Cadastra uma nova ordem de coleta usando dados dos clientes já cadastrados"""
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO coletas (
+            numero_coleta, emitente_nome, emitente_cnpj, emitente_endereco, emitente_telefone,
+            emitente_cidade, emitente_uf, emitente_cep, emitente_bairro, emitente_complemento, emitente_email,
+            destinatario_nome, destinatario_cnpj, destinatario_endereco, destinatario_telefone,
+            destinatario_cidade, destinatario_uf, destinatario_cep, destinatario_bairro, destinatario_complemento, destinatario_email,
+            data_solicitacao, data_coleta, horario,
+            peso, volume, status_coleta
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        coleta['numero_coleta'], 
+        emitente['nome'], emitente['cnpj'], emitente['endereco'], emitente['telefone'],
+        emitente['cidade'], emitente['uf'], emitente['cep'], emitente['bairro'], emitente['complemento'], emitente['email'],
+        destinatario['nome'], destinatario['cnpj'], destinatario['endereco'], destinatario['telefone'],
+        destinatario['cidade'], destinatario['uf'], destinatario['cep'], destinatario['bairro'], destinatario['complemento'], destinatario['email'],
+        coleta['data_solicitacao'], coleta['data_coleta'], coleta['horario'],
+        coleta['peso'], coleta['volume'], 'AGUARDANDO'
+    ))
+    conn.commit()
+
+def atualizar_status_coleta(conn, coleta_id, novo_status):
+    cursor = conn.cursor()
+    cursor.execute("UPDATE coletas SET status_coleta=? WHERE id=?", (novo_status, coleta_id))
+    conn.commit()
+
+def atualizar_rastreamento_coleta(conn, coleta_id, localizacao):
+    cursor = conn.cursor()
+    cursor.execute("UPDATE coletas SET localizacao_mercadoria=? WHERE id=?", (localizacao, coleta_id))
+    conn.commit()
+
+# ========= PDF  ==========
+
+class OrdemColetaPDF(FPDF):
+    def __init__(self, logo_bytes=None):
+        super().__init__()
+        self.logo_bytes = logo_bytes
+
+    def header(self):
+        if self.logo_bytes:
+            temp_logo = "temp_logo.png"
+            with open(temp_logo, "wb") as f:
+                f.write(self.logo_bytes)
+            self.image(temp_logo, 12, 10, 28)
+        self.set_font("Arial", "B", 18)
+        self.cell(0, 15, "Ordem de Coleta", align="C", ln=True)
+        self.ln(2)
+        self.set_font("Arial", "", 11)
+        self.cell(0, 8, "Documento gerado por Avila Transportes", align="C", ln=True)
+        self.ln(4)
+        self.set_draw_color(0, 102, 204)
+        self.set_line_width(0.5)
+        self.line(10, self.get_y(), 200, self.get_y())
+        self.ln(4)
+
+    def section(self, title):
+        self.set_font("Arial", "B", 12)
+        self.set_fill_color(230, 230, 255)
+        self.cell(0, 8, f" {title} ", ln=True, fill=True)
+        self.ln(1)
+
+    def value_line(self, label, value):
+        self.set_font("Arial", "B", 10)
+        self.cell(50, 7, label, border=0)
+        self.set_font("Arial", "", 10)
+        self.cell(0, 7, str(value), border=0, ln=True)
+
+    def add_ordem(self, coleta):
+        self.section(f"Dados da Coleta Nº {coleta['numero_coleta']}")
+        self.value_line("Nº Cotação Vinculada:", coleta.get('numero_cotacao', '-'))
+        self.value_line("Data Solicitação:", coleta['data_solicitacao'])
+        self.value_line("Data Coleta:", coleta['data_coleta'])
+        self.value_line("Horário:", coleta['horario'])
+        self.value_line("Tipo de Mercadoria:", coleta['tipo_mercadoria'])
+        self.value_line("Peso Estimado:", coleta['peso'])
+        self.value_line("Volume Estimado:", coleta['volume'])
+        self.value_line("Custo da Coleta:", coleta.get('custo_coleta', '-'))
+        self.value_line("Localização da Mercadoria:", coleta.get('localizacao_mercadoria', '-'))
+
+        self.ln(2)
+        self.section("Emitente (Remetente)")
+        self.value_line("Razão Social:", coleta['emitente_nome'])
+        self.value_line("CNPJ:", coleta['emitente_cnpj'])
+        self.value_line("Endereço:", f"{coleta.get('emitente_endereco', '')} - {coleta.get('emitente_bairro', '')}")
+        self.value_line("Cidade/UF:", f"{coleta.get('emitente_cidade', '')} - {coleta.get('emitente_uf', '')}")
+        self.value_line("CEP:", coleta.get('emitente_cep', ''))
+        self.value_line("Telefone:", coleta.get('emitente_telefone', ''))
+        self.value_line("Email:", coleta.get('emitente_email', ''))
+
+        self.ln(2)
+        self.section("Destinatário (Recebedor)")
+        self.value_line("Razão Social:", coleta['destinatario_nome'])
+        self.value_line("CNPJ:", coleta['destinatario_cnpj'])
+        self.value_line("Endereço:", f"{coleta.get('destinatario_endereco', '')} - {coleta.get('destinatario_bairro', '')}")
+        self.value_line("Cidade/UF:", f"{coleta.get('destinatario_cidade', '')} - {coleta.get('destinatario_uf', '')}")
+        self.value_line("CEP:", coleta.get('destinatario_cep', ''))
+        self.value_line("Telefone:", coleta.get('destinatario_telefone', ''))
+        self.value_line("Email:", coleta.get('destinatario_email', ''))
+
+        self.ln(2)
+        self.section("Observações")
+        self.set_font("Arial", "", 10)
+        self.multi_cell(0, 6, coleta['observacoes'])
+
+        self.ln(6)
+        self.value_line("Responsável pela Emissão:", coleta['responsavel'])
+        self.value_line("Assinatura:", "_____________________________")
+        self.ln(2)
+        self.set_font("Arial", "I", 7)
+        self.cell(0, 8, "Documento gerado automaticamente - Avila Transportes", align="C", ln=True)
+
+# ========= PARÂMETROS E FUNÇÕES DE FRETE ==========
+def calcula_cubagem(volumes):
+    cub_total = 0
+    for vol in volumes:
+        comp = float(vol.get('comprimento', 0)) / 100
+        larg = float(vol.get('largura', 0)) / 100
+        alt = float(vol.get('altura', 0)) / 100
+        cub = comp * larg * alt
+        cub_total += cub
+    return cub_total
+
+def sugestao_tipo_frete(cubagem, config):
+    if cubagem < config["fiorino_fracionado_max"]:
+        return "Fracionado Fiorino"
+    elif config["fiorino_dedicado_min"] <= cubagem <= config["fiorino_dedicado_max"]:
+        return "Dedicado Fiorino"
+    elif config["vanvuc_fracionado_min"] < cubagem <= config["vanvuc_fracionado_max"]:
+        return "Fracionado/Dedicado Van/VUC"
+    elif config["vanvuc_dedicado_min"] < cubagem <= config["vanvuc_dedicado_max"]:
+        return "Dedicado Van/VUC ou Fracionado 3/4"
+    else:
+        return "Acima do limite - Consulte Truck/Toco"
+
+def valor_frete_fiorino(km, pedagio, cubagem, config):
+    if config["fiorino_dedicado_min"] <= cubagem <= config["fiorino_dedicado_max"]:
+        return round(config["valor_km_fiorino"] * km + pedagio, 2)
+    return None
+
+def valor_frete_vanvuc(km, pedagio, cubagem, config):
+    if config["vanvuc_dedicado_min"] < cubagem <= config["vanvuc_dedicado_max"]:
+        return round(config["valor_km_vanvuc"] * km + pedagio, 2)
+    return None
+
+# ========= STREAMLIT APP ==========
+
+st.set_page_config(page_title="Ordem de Coleta - Avila Transportes", layout="centered")
+st.title("🚚 Avila Transportes - Sistema de Cotação e Ordem de Coleta")
+
+conn = init_db()
+
+# Importa cidades via Excel ao iniciar (apenas na primeira vez)
+importar_cidades_excel(conn, "cidades.xlsx")
+
+if "config" not in st.session_state:
+    st.session_state.config = get_default_config()
+config = st.session_state.config
+
+# Painel de configurações
+with st.sidebar.expander("⚙️ Configuração do Sistema", expanded=False):
+    st.markdown("### Parâmetros de Transportes")
+    config["fiorino_fracionado_max"] = st.number_input("Máx. cubagem Fiorino Fracionado (m³)", min_value=0.1, value=config["fiorino_fracionado_max"], step=0.1)
+    config["fiorino_dedicado_min"] = st.number_input("Mín. cubagem Fiorino Dedicado (m³)", min_value=0.1, value=config["fiorino_dedicado_min"], step=0.1)
+    config["fiorino_dedicado_max"] = st.number_input("Máx. cubagem Fiorino Dedicado (m³)", min_value=0.1, value=config["fiorino_dedicado_max"], step=0.1)
+    config["vanvuc_fracionado_min"] = st.number_input("Mín. cubagem Van/VUC Fracionado (m³)", min_value=0.1, value=config["vanvuc_fracionado_min"], step=0.1)
+    config["vanvuc_fracionado_max"] = st.number_input("Máx. cubagem Van/VUC Fracionado (m³)", min_value=0.1, value=config["vanvuc_fracionado_max"], step=0.1)
+    config["vanvuc_dedicado_min"] = st.number_input("Mín. cubagem Van/VUC Dedicado (m³)", min_value=0.1, value=config["vanvuc_dedicado_min"], step=0.1)
+    config["vanvuc_dedicado_max"] = st.number_input("Máx. cubagem Van/VUC Dedicado (m³)", min_value=0.1, value=config["vanvuc_dedicado_max"], step=0.1)
+    config["valor_km_fiorino"] = st.number_input("Valor do KM rodado Fiorino (R$)", min_value=0.0, value=config["valor_km_fiorino"], step=0.01)
+    config["valor_km_vanvuc"] = st.number_input("Valor do KM rodado Van/VUC (R$)", min_value=0.0, value=config["valor_km_vanvuc"], step=0.01)
+    st.session_state.config = config
+    st.success("Configuração salva! (ativa nesta sessão)")
+
+aba = st.sidebar.selectbox("Menu", [
+    "Clientes",
+    "Cidades",
+    "Cotações",
+    "Ordens de Coleta"
+])
+
+# ========== CLIENTES ==========
+if aba == "Clientes":
+    st.header("Cadastro & Busca de Clientes")
+    with st.form("novo_cliente"):
+        st.subheader("Dados do Cliente")
+        
+        # Linha 1: Razão Social e CNPJ/CPF
+        col1, col2 = st.columns(2)
+        with col1:
+            nome = st.text_input("Razão Social *", placeholder="Nome completo da empresa ou pessoa")
+        with col2:
+            cnpj = st.text_input("CNPJ/CPF *", placeholder="00.000.000/0000-00")
+        
+        # Linha 2: Inscrição Estadual e Email
+        col3, col4 = st.columns(2)
+        with col3:
+            inscricao_estadual = st.text_input("Inscrição Estadual", placeholder="000.000.000.000")
+        with col4:
+            email = st.text_input("Email", placeholder="cliente@empresa.com")
+        
+        # Linha 3: Telefone e CEP
+        col5, col6 = st.columns(2)
+        with col5:
+            telefone = st.text_input("Telefone *", placeholder="(11) 99999-9999")
+        with col6:
+            cep = st.text_input("CEP", placeholder="00000-000")
+        
+        # Endereço completo
+        st.subheader("Endereço")
+        endereco = st.text_input("Logradouro *", placeholder="Rua, Avenida, etc.")
+        
+        # Linha 4: Bairro e Complemento
+        col7, col8 = st.columns(2)
+        with col7:
+            bairro = st.text_input("Bairro", placeholder="Nome do bairro")
+        with col8:
+            complemento = st.text_input("Complemento", placeholder="Apto, Sala, Bloco, etc.")
+        
+        # Linha 5: Cidade e UF
+        col9, col10 = st.columns(2)
+        with col9:
+            cidade = st.text_input("Cidade *", placeholder="Nome da cidade")
+        with col10:
+            estados_brasil = [
+                "", "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", 
+                "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", 
+                "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"
+            ]
+            uf = st.selectbox("UF *", estados_brasil)
+        
+        st.info("📝 **Campos obrigatórios marcados com ***")
+        
+        submitted = st.form_submit_button("💾 Cadastrar Cliente", use_container_width=True)
+        if submitted:
+            # Validações
+            erros = []
+            if not nome:
+                erros.append("Razão Social é obrigatória")
+            if not cnpj:
+                erros.append("CNPJ/CPF é obrigatório")
+            if not telefone:
+                erros.append("Telefone é obrigatório")
+            if not endereco:
+                erros.append("Endereço é obrigatório")
+            if not cidade:
+                erros.append("Cidade é obrigatória")
+            if not uf:
+                erros.append("UF é obrigatória")
+            
+            if erros:
+                st.error("❌ **Erro:** " + " | ".join(erros))
+            else:
+                try:
+                    cadastrar_cliente(conn, nome, cnpj, inscricao_estadual, endereco, bairro, cidade, uf, email, telefone, cep, complemento)
+                    st.success(f"✅ Cliente **{nome}** cadastrado com sucesso!")
+                    st.balloons()
+                    st.stop()
+                except Exception as e:
+                    st.error(f"❌ Erro ao cadastrar cliente: {str(e)}")
+    
+    st.subheader("📋 Inventário de Clientes")
+    df_clientes = buscar_clientes(conn)
+    
+    if not df_clientes.empty:
+        # Filtro de busca
+        filtro_cliente = st.text_input("🔍 Filtrar clientes", placeholder="Digite nome, CNPJ ou cidade...")
+        if filtro_cliente:
+            df_filtrado = df_clientes[
+                df_clientes.apply(lambda row: filtro_cliente.lower() in str(row).lower(), axis=1)
+            ]
+        else:
+            df_filtrado = df_clientes
+        
+        # Exibir métricas
+        col_metric1, col_metric2, col_metric3 = st.columns(3)
+        with col_metric1:
+            st.metric("Total de Clientes", len(df_clientes))
+        with col_metric2:
+            if 'uf' in df_clientes.columns:
+                st.metric("Estados Atendidos", df_clientes['uf'].nunique())
+        with col_metric3:
+            st.metric("Filtrados", len(df_filtrado))
+        
+        # Exibir tabela
+        st.dataframe(df_filtrado, use_container_width=True, height=400)
+        
+        # Botão para download dos dados
+        csv_data = df_clientes.to_csv(index=False, encoding='utf-8-sig')
+        st.download_button(
+            label="📥 Exportar Clientes (CSV)",
+            data=csv_data,
+            file_name=f"clientes_avila_transportes_{datetime.datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv"
+        )
+    else:
+        st.info("👥 Nenhum cliente cadastrado ainda. Use o formulário acima para adicionar o primeiro cliente.")
+
+# ========== CIDADES ==========
+if aba == "Cidades":
+    st.header("Cadastro & Consulta de Cidades")
+    
+    # Aviso sobre limitações da API
+    st.info("💡 **Dica:** Use a busca manual ou por UF para adicionar cidades conforme necessário. A sincronização completa deve ser usada apenas uma vez.")
+    
+    # Botões de ação
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        # Busca por estado (mais eficiente)
+        st.markdown("**🏙️ Buscar por Estado:**")
+        estados_brasil = [
+            "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", 
+            "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", 
+            "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"
+        ]
+        uf_selecionada = st.selectbox("Selecione UF", ["Selecione..."] + estados_brasil)
+        
+        if st.button("📥 Importar Cidades") and uf_selecionada != "Selecione...":
+            with st.spinner(f"Buscando cidades de {uf_selecionada}..."):
+                df_uf = buscar_cidades_por_uf_ibge(uf_selecionada)
+                if not df_uf.empty:
+                    cursor = conn.cursor()
+                    contador = 0
+                    for _, cidade in df_uf.iterrows():
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO cidades (nome) VALUES (?)", 
+                            (cidade['nome_completo'],)
+                        )
+                        contador += 1
+                    conn.commit()
+                    st.success(f"✅ {contador} cidades de {uf_selecionada} importadas!")
+                else:
+                    st.error("Erro ao buscar cidades. Tente novamente em alguns minutos.")
+    
+    with col2:
+        # Busca manual (mais eficiente)
+        st.markdown("**🔍 Busca Manual:**")
+        termo_busca = st.text_input("Digite o nome da cidade", placeholder="Ex: São Paulo")
+        
+        if st.button("🔎 Buscar") and termo_busca:
+            with st.spinner("Buscando..."):
+                try:
+                    # Busca apenas cidades que contenham o termo
+                    url = f"https://servicodados.ibge.gov.br/api/v1/localidades/municipios"
+                    response = requests.get(url, timeout=8)
+                    if response.status_code == 200:
+                        municipios = response.json()
+                        resultados = [
+                            f"{m['nome']} - {m['microrregiao']['mesorregiao']['UF']['sigla']}"
+                            for m in municipios 
+                            if termo_busca.lower() in m['nome'].lower()
+                        ][:15]  # Limita a 15 resultados
+                        
+                        if resultados:
+                            st.success(f"Encontradas {len(resultados)} cidades:")
+                            for cidade in resultados[:5]:  # Mostra apenas as 5 primeiras
+                                if st.button(f"➕ {cidade}", key=f"add_{cidade}"):
+                                    cadastrar_cidade(conn, cidade)
+                                    st.success(f"Cidade '{cidade}' adicionada!")
+                                    st.rerun()
+                            
+                            if len(resultados) > 5:
+                                with st.expander(f"Ver mais {len(resultados) - 5} cidades..."):
+                                    for cidade in resultados[5:]:
+                                        if st.button(f"➕ {cidade}", key=f"add_{cidade}"):
+                                            cadastrar_cidade(conn, cidade)
+                                            st.success(f"Cidade '{cidade}' adicionada!")
+                                            st.rerun()
+                        else:
+                            st.info("Nenhuma cidade encontrada com esse nome")
+                    else:
+                        st.error("Erro na consulta. Tente novamente em alguns minutos.")
+                except Exception as e:
+                    st.error(f"Erro ao buscar: {str(e)}")
+    
+    with col3:
+        # Função de sincronização completa (restrita)
+        st.markdown("**⚠️ Função Administrativa:**")
+        
+        # Checkbox de confirmação para uso restrito
+        admin_mode = st.checkbox("Modo Desenvolvedor", help="Use apenas uma vez para configuração inicial")
+        
+        if admin_mode:
+            st.warning("⚠️ Esta função faz muitas requisições à API do IBGE. Use apenas uma vez!")
+            if st.button("🔄 Sincronização Completa", help="Importa todas as 5.570 cidades do Brasil"):
+                if st.checkbox("Confirmo que entendo as limitações"):
+                    sincronizar_cidades_ibge(conn)
+                else:
+                    st.error("Confirme antes de prosseguir")
+        else:
+            st.info("💡 Para uso normal, use as opções ao lado")
+    
+    # Cadastro manual sempre disponível
+    st.markdown("---")
+    st.subheader("✏️ Cadastro Manual")
+    with st.form("nova_cidade"):
+        col_manual1, col_manual2 = st.columns(2)
+        with col_manual1:
+            nome_cidade = st.text_input("Nome da Cidade")
+        with col_manual2:
+            uf_manual = st.selectbox("UF", [""] + estados_brasil)
+        
+        submitted_cidade = st.form_submit_button("Cadastrar Cidade")
+        if submitted_cidade:
+            if not nome_cidade:
+                st.warning("Preencha o nome da cidade!")
+            else:
+                cidade_completa = f"{nome_cidade} - {uf_manual}" if uf_manual else nome_cidade
+                cadastrar_cidade(conn, cidade_completa)
+                st.success(f"Cidade '{cidade_completa}' cadastrada!")
+                st.rerun()
+    
+    # Lista de cidades cadastradas
+    st.subheader("📋 Cidades Cadastradas")
+    df_cidades = buscar_cidades(conn)
+    
+    # Estatísticas
+    if not df_cidades.empty:
+        col_stats1, col_stats2, col_stats3 = st.columns(3)
+        with col_stats1:
+            st.metric("Total de Cidades", len(df_cidades))
+        with col_stats2:
+            # Contar por UF se possível
+            cidades_com_uf = df_cidades[df_cidades['nome'].str.contains(' - ')]['nome'].str.split(' - ').str[1].value_counts()
+            if not cidades_com_uf.empty:
+                st.metric("Estados Cadastrados", len(cidades_com_uf))
+        with col_stats3:
+            st.metric("Última Adição", "Hoje" if len(df_cidades) > 0 else "Nenhuma")
+        
+        # Filtro para a tabela
+        filtro = st.text_input("🔍 Filtrar cidades", placeholder="Digite para filtrar...")
+        if filtro:
+            df_cidades = df_cidades[df_cidades['nome'].str.contains(filtro, case=False, na=False)]
+        
+        # Paginação para melhor performance
+        if len(df_cidades) > 100:
+            st.info(f"Mostrando primeiras 100 de {len(df_cidades)} cidades. Use o filtro para buscar.")
+            df_cidades = df_cidades.head(100)
+        
+        st.dataframe(df_cidades, use_container_width=True, height=400)
+    else:
+        st.info("Nenhuma cidade cadastrada. Use as opções acima para adicionar cidades.")
+
+# ========== COTAÇÕES ==========
+def gerar_numero_cotacao():
+    agora = datetime.datetime.now()
+    return f"Q{agora.strftime('%Y%m%d%H%M%S')}"
+
+if aba == "Cotações":
+    st.header("Cadastro e Consulta de Cotações")
+    df_cidades = buscar_cidades(conn)
+    df_clientes = buscar_clientes(conn)
+    
+    # Aviso se não há cidades cadastradas
+    if df_cidades.empty:
+        st.warning("⚠️ Nenhuma cidade cadastrada! Vá para a aba 'Cidades' e sincronize com o IBGE ou cadastre manualmente.")
+        st.stop()
+    
+    with st.form("nova_cotacao"):
+        cliente_nome = st.selectbox("Cliente", options=df_clientes["nome"].tolist() + ["Outro (manual)"])
+        if cliente_nome == "Outro (manual)":
+            col_manual1, col_manual2 = st.columns(2)
+            with col_manual1:
+                cliente_nome = st.text_input("Nome do Cliente")
+            with col_manual2:
+                cnpj = st.text_input("CNPJ/CPF")
+        else:
+            cliente_dados = df_clientes[df_clientes["nome"] == cliente_nome].iloc[0]
+            cnpj = cliente_dados["cnpj"]
+            st.info(f"📋 **Cliente Selecionado:** {cliente_nome} - CNPJ: {cnpj}")
+        
+        # Campos de origem e destino com busca
+        col_origem, col_destino = st.columns(2)
+        with col_origem:
+            st.markdown("**Origem:**")
+            origem = selectbox_cidade_com_busca("Cidade de Origem", df_cidades, key="origem_select")
+        with col_destino:
+            st.markdown("**Destino:**")
+            destino = selectbox_cidade_com_busca("Cidade de Destino", df_cidades, key="destino_select")
+        data_solicitacao = st.date_input("Data da Solicitação", datetime.date.today())
+        mercadoria = st.text_input("Tipo de Mercadoria")
+        peso = st.text_input("Peso Estimado")
+        # Bloco Volumes e Cubagem
+        st.markdown("#### Volumes")
+        num_volumes = st.number_input("Qtd Volumes", 1, 20, 1)
+        volumes = []
+        cubagem_total = 0
+        for i in range(num_volumes):
+            st.markdown(f"**Volume {i+1}**")
+            comp = st.number_input(f"Comprimento (cm) - Vol {i+1}", min_value=1, value=10, key=f"comp_{i}")
+            larg = st.number_input(f"Largura (cm) - Vol {i+1}", min_value=1, value=10, key=f"larg_{i}")
+            alt = st.number_input(f"Altura (cm) - Vol {i+1}", min_value=1, value=10, key=f"alt_{i}")
+            volumes.append({'comprimento': comp, 'largura': larg, 'altura': alt})
+        cubagem_total = calcula_cubagem(volumes)
+        st.success(f"Cubagem total: {cubagem_total:.3f} m³")
+        tipo_frete = sugestao_tipo_frete(cubagem_total, config)
+        st.info(f"Sugestão de tipo de frete: {tipo_frete}")
+        volume_str = f"{cubagem_total:.3f} m³"
+        valor_cotado = st.text_input("Valor Cotado (R$)")
+        validade = st.text_input("Validade da Cotação (ex: 5 dias, até 01/08/2025...)")
+        observacoes = st.text_area("Observações")
+        responsavel = st.text_input("Responsável", value="Nícolas Rosa Ávila Barros")
+        submitted = st.form_submit_button("Cadastrar Cotação")
+        if submitted:
+            if not cliente_nome or not cnpj or not origem or not destino or not valor_cotado:
+                st.warning("Preencha todos os campos obrigatórios!")
+            else:
+                numero_cotacao = gerar_numero_cotacao()
+                cotacao = dict(
+                    numero_cotacao=numero_cotacao,
+                    cliente_nome=cliente_nome,
+                    cnpj=cnpj,
+                    origem=origem,
+                    destino=destino,
+                    data_solicitacao=data_solicitacao.strftime('%d/%m/%Y'),
+                    mercadoria=mercadoria,
+                    peso=peso,
+                    volume=volume_str,
+                    valor_cotado=valor_cotado,
+                    validade=validade,
+                    observacoes=observacoes,
+                    responsavel=responsavel,
+                    status='PENDENTE'
+                )
+                cadastrar_cotacao(conn, cotacao)
+                st.success(f"Cotação {numero_cotacao} cadastrada!")
+                st.stop()
+
+    st.subheader("Cotações Cadastradas")
+    df_cotacoes = buscar_cotacoes(conn)
+    for idx, row in df_cotacoes.iterrows():
+        with st.expander(f"Cotação: {row['numero_cotacao']} - {row['cliente_nome']} - Status: {row['status']}"):
+            st.write(f"**Origem:** {row['origem']}")
+            st.write(f"**Destino:** {row['destino']}")
+            st.write(f"**Tipo Mercadoria:** {row['mercadoria']}")
+            st.write(f"**Peso:** {row['peso']}")
+            st.write(f"**Volume:** {row['volume']}")
+            st.write(f"**Valor Cotado:** {row['valor_cotado']}")
+            st.write(f"**Validade:** {row['validade']}")
+            st.write(f"**Responsável:** {row['responsavel']}")
+            st.write(f"**Observações:** {row['observacoes']}")
+            # Aprovar cotação
+            if row['status'] == "PENDENTE":
+                if st.button(f"Aprovar Cotação {row['numero_cotacao']}", key=f"aprov_{row['id']}"):
+                    atualizar_status_cotacao(conn, row['id'], "APROVADA")
+                    st.success("Cotação aprovada!")
+                    st.stop()
+            # Gerar ordem de coleta vinculada
+            if row['status'] == "APROVADA":
+                if st.button(f"Gerar Ordem de Coleta para {row['numero_cotacao']}", key=f"ordem_{row['id']}"):
+                    st.session_state.nova_ordem_cotacao = row['numero_cotacao']
+                    st.rerun()
+
+# ========== ORDEM DE COLETA ==========
+def gerar_numero_coleta():
+    agora = datetime.datetime.now()
+    return f"C{agora.strftime('%Y%m%d%H%M%S')}"
+
+if aba == "Ordens de Coleta":
+    st.header("Nova Ordem de Coleta")
+
+    df_clientes = buscar_clientes(conn)
+    if df_clientes.empty:
+        st.error("❌ Não há clientes cadastrados. Por favor, cadastre os clientes primeiro.")
+        st.stop()
+        
+    # Se veio da cotação aprovada, já preenche
+    cotacao_info = None
+    if "nova_ordem_cotacao" in st.session_state:
+        cot_num = st.session_state.nova_ordem_cotacao
+        df_cotacoes = buscar_cotacoes(conn)
+        cotacao_info = df_cotacoes[df_cotacoes["numero_cotacao"] == cot_num].iloc[0]
+        del st.session_state.nova_ordem_cotacao
+
+    opcoes = df_clientes["nome"].tolist()
+
+    col1, col2, col3 = st.columns([2,2,1])
+    with col1:
+        st.subheader("Emitente")
+        emitente_nome = st.selectbox("Selecione o emitente", options=opcoes, key="emitente")
+        emitente = df_clientes[df_clientes["nome"] == emitente_nome].iloc[0]
+    
+    with col2:
+        st.subheader("Destinatário")
+        destinatario_nome = st.selectbox("Selecione o destinatário", options=opcoes, key="destinatario")
+        destinatario = df_clientes[df_clientes["nome"] == destinatario_nome].iloc[0]
+    
+    with col3:
+        st.subheader("Peso")
+        peso = st.text_input("KG", key="peso")
+
+    st.subheader("Dimensões")
+    col4, col5, col6 = st.columns(3)
+    with col4:
+        altura = st.number_input("Altura (cm)", min_value=1, value=10)
+    with col5:
+        largura = st.number_input("Largura (cm)", min_value=1, value=10)
+    with col6:
+        comprimento = st.number_input("Comprimento (cm)", min_value=1, value=10)
+    
+    # Calcula volume em m³
+    volume = (altura * largura * comprimento) / 1000000  # converte cm³ para m³
+    st.info(f"Volume calculado: {volume:.3f} m³")
+    
+    # Botão de submissão
+    if st.button("Criar Ordem de Coleta", type="primary"):
+        if not peso:
+            st.error("Por favor, preencha o peso.")
+            st.stop()
+            
+        coleta = {
+            'numero_coleta': gerar_numero_coleta(),
+            'data_solicitacao': datetime.date.today().strftime('%d/%m/%Y'),
+            'data_coleta': datetime.date.today().strftime('%d/%m/%Y'),
+            'horario': datetime.datetime.now().strftime('%H:%M'),
+            'peso': peso,
+            'volume': f"{volume:.3f}"
+        }
+        
+        try:
+            cadastrar_coleta(conn, coleta, emitente, destinatario)
+            st.success("✅ Ordem de coleta criada com sucesso!")
+            st.balloons()
+        except Exception as e:
+            st.error(f"❌ Erro ao criar ordem de coleta: {str(e)}")
+    
+    def campos_cliente(prefixo, dados_cliente=None):
+        """Função para exibir campos do cliente com dados preenchidos se disponível"""
+        col1, col2 = st.columns(2)
+        with col1:
+            # Se dados_cliente for um DataFrame ou Series, converter para dicionário
+            if isinstance(dados_cliente, (pd.DataFrame, pd.Series)):
+                dados_cliente = dados_cliente.to_dict() if isinstance(dados_cliente, pd.Series) else dados_cliente.iloc[0].to_dict()    
+            
+            # Campo CNPJ
+            prefixo = prefixo.upper()
+            cnpj = st.text_input(
+                f"CNPJ/CPF ({prefixo})", 
+                value=dados_cliente.get("cnpj", "") if dados_cliente else "",
+                key=f"cnpj_{prefixo.lower()}"
+            )
+            
+            endereco = st.text_input(
+                f"Logradouro ({prefixo})", 
+                value=dados_cliente.get("endereco", "") if dados_cliente else "",
+                key=f"endereco_{prefixo.lower()}"
+            )
+            
+            cidade = st.text_input(
+                f"Cidade ({prefixo})", 
+                value=dados_cliente.get("cidade", "") if dados_cliente else "",
+                key=f"cidade_{prefixo.lower()}"
+            )
+            
+            email = st.text_input(
+                f"Email ({prefixo})", 
+                value=dados_cliente.get("email", "") if dados_cliente else "",
+                key=f"email_{prefixo.lower()}"
+            )
+
+        with col2:
+            telefone = st.text_input(
+                f"Telefone ({prefixo})", 
+                value=dados_cliente.get("telefone", "") if dados_cliente else "",
+                key=f"telefone_{prefixo.lower()}"
+            )
+            
+            bairro = st.text_input(
+                f"Bairro ({prefixo})", 
+                value=dados_cliente.get("bairro", "") if dados_cliente else "",
+                key=f"bairro_{prefixo.lower()}"
+            )
+            
+            uf = st.text_input(
+                f"UF ({prefixo})", 
+                value=dados_cliente.get("uf", "") if dados_cliente else "",
+                key=f"uf_{prefixo.lower()}"
+            )
+            
+            cep = st.text_input(
+                f"CEP ({prefixo})", 
+                value=dados_cliente.get("cep", "") if dados_cliente else "",
+                key=f"cep_{prefixo.lower()}"
+            )
+            
+            complemento = st.text_input(
+                f"Complemento ({prefixo})", 
+                value=dados_cliente.get("complemento", "") if dados_cliente else "",
+                key=f"complemento_{prefixo.lower()}"
+            )
+    
+        return cnpj, endereco, cidade, email, telefone, bairro, uf, cep, complemento
+
+    # Datas e horário
+    col3, col4, col5 = st.columns(3)
+    with col3:
+        data_solicitacao = st.date_input("Data da Solicitação", datetime.date.today())
+    with col4:
+        data_coleta = st.date_input("Data da Coleta", datetime.date.today())
+    with col5:
+        horario = st.text_input("Horário para Coleta", "08:00 - 12:00")
+
+    # Dados emitente
+    if emitente_nome == "Outro (manual)":
+        st.markdown("### 📤 Dados do Emitente")
+        emitente_nome = st.text_input("Nome do Emitente")
+        emitente_cnpj, emitente_endereco, emitente_cidade, emitente_email, emitente_telefone, emitente_bairro, emitente_uf, emitente_cep, emitente_complemento = campos_cliente("Emitente")
+    else:
+        dados_emitente = df_clientes[df_clientes["nome"] == emitente_nome].iloc[0] if not df_clientes.empty and emitente_nome in df_clientes["nome"].tolist() else {}
+        st.markdown("### 📤 Dados do Emitente")
+        st.info(f"📋 Dados carregados do cliente: **{emitente_nome}**")
+        emitente_cnpj, emitente_endereco, emitente_cidade, emitente_email, emitente_telefone, emitente_bairro, emitente_uf, emitente_cep, emitente_complemento = campos_cliente("Emitente", dados_emitente)
+
+    # Dados destinatário
+    if destinatario_nome == "Outro (manual)":
+        st.markdown("### 📥 Dados do Destinatário")
+        destinatario_nome = st.text_input("Nome do Destinatário")
+        destinatario_cnpj, destinatario_endereco, destinatario_cidade, destinatario_email, destinatario_telefone, destinatario_bairro, destinatario_uf, destinatario_cep, destinatario_complemento = campos_cliente("Destinatário")
+    else:
+        dados_destinatario = df_clientes[df_clientes["nome"] == destinatario_nome].iloc[0] if not df_clientes.empty and destinatario_nome in df_clientes["nome"].tolist() else {}
+        st.markdown("### 📥 Dados do Destinatário")
+        st.info(f"📋 Dados carregados do cliente: **{destinatario_nome}**")
+        destinatario_cnpj, destinatario_endereco, destinatario_cidade, destinatario_email, destinatario_telefone, destinatario_bairro, destinatario_uf, destinatario_cep, destinatario_complemento = campos_cliente("Destinatário", dados_destinatario)
+
+    tipo_mercadoria = cotacao_info["mercadoria"] if cotacao_info is not None else st.text_input("Tipo de Mercadoria")
+    peso = cotacao_info["peso"] if cotacao_info is not None else st.text_input("Peso Estimado")
+    volume = cotacao_info["volume"] if cotacao_info is not None else st.text_input("Volume Estimado")
+    observacoes = cotacao_info["observacoes"] if cotacao_info is not None else st.text_area("Observações")
+    responsavel = st.text_input("Responsável", "Nícolas Rosa Ávila Barros")
+    logo = st.file_uploader("Logo para PDF (PNG/JPG)", type=["png", "jpg", "jpeg"])
+
+    numero_cotacao = cotacao_info["numero_cotacao"] if cotacao_info is not None else st.text_input("Vincular nº Cotação (opcional)")
+
+    # Rastreamento, custo e status
+    custo_coleta = st.text_input("Custo da Coleta (R$)", "")
+    localizacao_mercadoria = st.text_input("Localização/Rastreamento", "")
+    gerar = st.button("Gerar Ordem de Coleta")
+    if gerar:
+        numero_coleta = gerar_numero_coleta()
+        coleta = dict(
+            numero_coleta=numero_coleta,
+            numero_cotacao=numero_cotacao,
+            emitente_nome=emitente_nome,
+            emitente_cnpj=emitente_cnpj,
+            emitente_endereco=emitente_endereco,
+            emitente_telefone=emitente_telefone,
+            emitente_cidade=emitente_cidade,
+            emitente_uf=emitente_uf,
+            emitente_cep=emitente_cep,
+            emitente_bairro=emitente_bairro,
+            emitente_complemento=emitente_complemento,
+            emitente_email=emitente_email,
+            destinatario_nome=destinatario_nome,
+            destinatario_cnpj=destinatario_cnpj,
+            destinatario_endereco=destinatario_endereco,
+            destinatario_telefone=destinatario_telefone,
+            destinatario_cidade=destinatario_cidade,
+            destinatario_uf=destinatario_uf,
+            destinatario_cep=destinatario_cep,
+            destinatario_bairro=destinatario_bairro,
+            destinatario_complemento=destinatario_complemento,
+            destinatario_email=destinatario_email,
+            data_solicitacao=data_solicitacao.strftime('%d/%m/%Y'),
+            data_coleta=data_coleta.strftime('%d/%m/%Y'),
+            horario=horario,
+            tipo_mercadoria=tipo_mercadoria,
+            peso=peso,
+            volume=volume,
+            observacoes=observacoes,
+            responsavel=responsavel,
+            logo=logo.read() if logo else None,
+            status_coleta="AGUARDANDO",
+            custo_coleta=custo_coleta,
+            localizacao_mercadoria=localizacao_mercadoria
+        )
+        cadastrar_coleta(conn, coleta)
+        pdf = OrdemColetaPDF(logo_bytes=coleta['logo'])
+        pdf.add_page()
+        pdf.add_ordem(coleta)
+        pdf_buffer = io.BytesIO()
+        pdf.output(pdf_buffer, 'S')
+        pdf_buffer.seek(0)
+        st.success(f"Ordem de Coleta {numero_coleta} cadastrada com sucesso!")
+        st.download_button(
+            label="📥 Baixar PDF da Ordem de Coleta",
+            data=pdf_buffer,
+            file_name=f"ordem_coleta_{numero_coleta}.pdf",
+            mime="application/pdf"
+        )
+
+    # Lista de ordens de coleta já criadas
+    st.subheader("Ordens de Coleta Registradas")
+    df = buscar_coletas(conn)
+    for idx, coleta_row in df.iterrows():
+        with st.expander(f"Ordem: {coleta_row['numero_coleta']} | Cotação: {coleta_row['numero_cotacao']} | Status: {coleta_row['status_coleta']}"):
+            st.write(f"Emitente: {coleta_row['emitente_nome']} | Destinatário: {coleta_row['destinatario_nome']}")
+            st.write(f"Data Solicitação: {coleta_row['data_solicitacao']}, Data Coleta: {coleta_row['data_coleta']}, Horário: {coleta_row['horario']}")
+            st.write(f"Tipo de Mercadoria: {coleta_row['tipo_mercadoria']}")
+            st.write(f"Peso: {coleta_row['peso']}, Volume: {coleta_row['volume']}")
+            st.write(f"Custo: {coleta_row.get('custo_coleta', '-')}")
+            st.write(f"Rastreamento: {coleta_row.get('localizacao_mercadoria', '-')}")
+            # Marcar como coletada
+            if coleta_row['status_coleta'] != "COLETADA":
+                if st.button(f"Marcar como COLETADA ({coleta_row['numero_coleta']})", key=f"coletada_{coleta_row['id']}"):
+                    atualizar_status_coleta(conn, coleta_row['id'], "COLETADA")
+                    # Aqui: mensagem WhatsApp
+                    telefone_destinatario = coleta_row.get('destinatario_telefone', '')
+                    msg = f"Olá, sua mercadoria foi coletada pela Avila Transportes! Ordem: {coleta_row['numero_coleta']}"
+                    if telefone_destinatario:
+                        # Remove caracteres especiais do telefone
+                        telefone_limpo = ''.join(filter(str.isdigit, telefone_destinatario))
+                        wa_link = f"https://wa.me/55{telefone_limpo}?text={urllib.parse.quote(msg)}"
+                        st.success("Status atualizado para COLETADA.")
+                        st.markdown(f"[📱 Enviar WhatsApp para Destinatário]({wa_link})")
+                    else:
+                        st.success("Status atualizado para COLETADA.")
+                        st.info("📱 Telefone do destinatário não informado para envio de WhatsApp")
+                    st.stop()
+            # Download PDF
+            logo_bytes = coleta_row['logo']
+            coleta_dict = coleta_row.to_dict()
+            pdf = OrdemColetaPDF(logo_bytes=logo_bytes)
+            pdf.add_page()
+            pdf.add_ordem(coleta_dict)
+            pdf_buffer = io.BytesIO()
+            pdf.output(pdf_buffer, 'S')
+            pdf_buffer.seek(0)
+            st.download_button(
+                label="📥 Baixar PDF da Ordem de Coleta",
+                data=pdf_buffer,
+                file_name=f"ordem_coleta_{coleta_row['numero_coleta']}.pdf",
+                mime="application/pdf"
+            )
+# Fechar conexão ao finalizar
+        conn.close()
+        pdf.output(pdf_buffer, 'S')
+        pdf_buffer.seek(0) 
+        st.success(f"Ordem de Coleta {numero_coleta} cadastrada com sucesso!")
+        st.download_button(
+            label="📥 Baixar PDF da Ordem de Coleta",
+            data=pdf_buffer,
+            file_name=f"ordem_coleta_{numero_coleta}.pdf",
+            mime="application/pdf"
+        )
+
+    # Lista de ordens de coleta já criadas
+    st.subheader("Ordens de Coleta Registradas")
+    df = buscar_coletas(conn)
+    for idx, coleta_row in df.iterrows():
+        with st.expander(f"Ordem: {coleta_row['numero_coleta']} | Cotação: {coleta_row['numero_cotacao']} | Status: {coleta_row['status_coleta']}"):
+            st.write(f"Emitente: {coleta_row['emitente_nome']} | Destinatário: {coleta_row['destinatario_nome']}")
+            st.write(f"Data Solicitação: {coleta_row['data_solicitacao']}, Data Coleta: {coleta_row['data_coleta']}, Horário: {coleta_row['horario']}")
+            st.write(f"Tipo de Mercadoria: {coleta_row['tipo_mercadoria']}")
+            st.write(f"Peso: {coleta_row['peso']}, Volume: {coleta_row['volume']}")
+            st.write(f"Custo: {coleta_row.get('custo_coleta', '-')}")
+            st.write(f"Rastreamento: {coleta_row.get('localizacao_mercadoria', '-')}")
+            # Marcar como coletada
+            if coleta_row['status_coleta'] != "COLETADA":
+                if st.button(f"Marcar como COLETADA ({coleta_row['numero_coleta']})", key=f"coletada_{coleta_row['id']}"):
+                    atualizar_status_coleta(conn, coleta_row['id'], "COLETADA")
+                    # Aqui: mensagem WhatsApp
+                    telefone_destinatario = coleta_row.get('destinatario_telefone', '')
+                    msg = f"Olá, sua mercadoria foi coletada pela Avila Transportes! Ordem: {coleta_row['numero_coleta']}"
+                    if telefone_destinatario:
+                        # Remove caracteres especiais do telefone
+                        telefone_limpo = ''.join(filter(str.isdigit, telefone_destinatario))
+                        wa_link = f"https://wa.me/55{telefone_limpo}?text={urllib.parse.quote(msg)}"
+                        st.success("Status atualizado para COLETADA.")
+                        st.markdown(f"[📱 Enviar WhatsApp para Destinatário]({wa_link})")
+                    else:
+                        st.success("Status atualizado para COLETADA.")
+                        st.info("📱 Telefone do destinatário não informado para envio de WhatsApp")
+                    st.stop()
+            # Download PDF
+            logo_bytes = coleta_row['logo']
+            coleta_dict = coleta_row.to_dict()
+            pdf = OrdemColetaPDF(logo_bytes=logo_bytes)
+            pdf.add_page()
+            pdf.add_ordem(coleta_dict)
+            pdf_buffer = io.BytesIO()
+            pdf.output(pdf_buffer, 'S')
+            pdf_buffer.seek(0)
+            st.download_button(
+                label="📥 Baixar PDF da Ordem de Coleta",
+                data=pdf_buffer,
+                file_name=f"ordem_coleta_{coleta_row['numero_coleta']}.pdf",
+                mime="application/pdf"
+            )
+
+# Fechar conexão ao finalizar
+conn.close()
