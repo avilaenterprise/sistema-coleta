@@ -1084,7 +1084,7 @@ if aba == "Ordens de Coleta":
             custo_coleta=custo_coleta,
             localizacao_mercadoria=localizacao_mercadoria
         )
-        cadastrar_coleta(conn, coleta)
+        cadastrar_coleta(conn, coleta['emitente'], coleta['destinatario'])
         pdf = OrdemColetaPDF(logo_bytes=coleta['logo'])
         pdf.add_page()
         pdf.add_ordem(coleta)
